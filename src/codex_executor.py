@@ -305,6 +305,75 @@ class CodexExecutor:
                 except Exception:
                     log.debug("Failed to set agent status to online")
 
+    async def run_dream(self, task_id: str, prompt: str) -> None:
+        """Execute a dream task in the background — no streamer, no semaphore."""
+        log.info("Dream task %s starting in background", task_id)
+
+        # Progress heartbeat keeps the claim alive during reflection
+        claim_expired = asyncio.Event()
+        progress_task: asyncio.Task | None = None
+        if self._apiary:
+            progress_task = asyncio.create_task(
+                self._report_progress(task_id, claim_expired)
+            )
+
+        try:
+            cmd = self._build_codex_command(prompt=prompt)
+            env = {**os.environ}
+            if self._config.openai_api_key:
+                env["OPENAI_API_KEY"] = self._config.openai_api_key
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=PIPE,
+                stderr=PIPE,
+                cwd=self._config.codex_working_dir,
+                env=env,
+                limit=16 * 1024 * 1024,
+            )
+
+            full_text = ""
+            async for line in process.stdout:
+                if claim_expired.is_set():
+                    log.warning("Dream task %s claim expired during execution", task_id)
+                    process.kill()
+                    return
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                text = self._extract_text(event)
+                if text:
+                    full_text += text
+
+            await process.wait()
+
+            result = full_text[-2000:] if len(full_text) > 2000 else full_text
+            summary = {
+                "description": "Dream: automated reflection on recent work",
+                "output_excerpt": full_text[:500] if full_text else None,
+            }
+            if self._apiary and not claim_expired.is_set():
+                await self._apiary.complete_task(task_id, result, summary=summary)
+            log.info("Dream task %s completed", task_id)
+        except Exception:
+            log.warning("Dream task %s failed", task_id, exc_info=True)
+            if self._apiary and not claim_expired.is_set():
+                try:
+                    await self._apiary.fail_task(task_id, "Dream reflection failed")
+                except Exception:
+                    pass
+        finally:
+            if progress_task:
+                progress_task.cancel()
+                try:
+                    await progress_task
+                except asyncio.CancelledError:
+                    pass
+
     def _build_codex_command(
         self,
         prompt: str,
@@ -411,6 +480,7 @@ class CodexExecutor:
                     stderr=PIPE,
                     cwd=effective_cwd,
                     env=env,
+                    limit=16 * 1024 * 1024,  # 16 MB — Codex JSONL events can contain large diffs
                 )
 
                 stderr_chunks: list[bytes] = []
@@ -418,44 +488,86 @@ class CodexExecutor:
 
                 log.debug("Running codex command: %s (cwd=%s)", cmd, effective_cwd)
 
-                async for line in process.stdout:
-                    line = line.strip()
-                    if not line:
-                        continue
+                # Read stdout in a coroutine so we can apply a post-exit
+                # timeout if the process dies but grandchild pipes stay open.
+                async def _drain_stdout():
+                    nonlocal full_text
+                    async for line in process.stdout:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            log.debug("Non-JSON line from codex: %s", line[:200])
+                            continue
+
+                        # Capture error events from JSON stream
+                        if event.get("type") == "error":
+                            json_errors.append(event.get("message", ""))
+                        if event.get("type") == "turn.failed":
+                            err_info = event.get("error", {})
+                            if isinstance(err_info, dict):
+                                json_errors.append(err_info.get("message", ""))
+
+                        # Extract session ID
+                        sid = self._extract_session_id(event)
+                        if sid and req.source == "telegram":
+                            self._sessions.set(req.chat_id, sid)
+
+                        text = self._extract_text(event)
+                        if text:
+                            full_text += text
+                            await streamer.append(text)
+
+                        tool_info = self._extract_tool_use(event)
+                        if tool_info:
+                            await streamer.send_tool_notification(*tool_info)
+
+                drain_task = asyncio.create_task(_drain_stdout())
+                wait_task = asyncio.create_task(process.wait())
+
+                # Wait for both drain and process exit.  When the process
+                # exits, give the drain 30s to finish (grandchild processes
+                # may hold pipes open).  If drain finishes first, wait()
+                # will follow almost instantly.
+                done, pending = await asyncio.wait(
+                    [drain_task, wait_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                for p in pending:
                     try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        log.debug("Non-JSON line from codex: %s", line[:200])
-                        continue
+                        await asyncio.wait_for(asyncio.shield(p), timeout=30)
+                    except asyncio.TimeoutError:
+                        log.warning(
+                            "Codex process or stdout drain timed out after 30s — "
+                            "killing (pid=%s, rc=%s)",
+                            process.pid, process.returncode,
+                        )
+                        p.cancel()
+                        try:
+                            await p
+                        except asyncio.CancelledError:
+                            pass
 
-                    # Capture error events from JSON stream
-                    if event.get("type") == "error":
-                        json_errors.append(event.get("message", ""))
-                    if event.get("type") == "turn.failed":
-                        err_info = event.get("error", {})
-                        if isinstance(err_info, dict):
-                            json_errors.append(err_info.get("message", ""))
+                # Ensure process is dead
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    await process.wait()
 
-                    # Extract session ID
-                    sid = self._extract_session_id(event)
-                    if sid and req.source == "telegram":
-                        self._sessions.set(req.chat_id, sid)
-
-                    text = self._extract_text(event)
-                    if text:
-                        full_text += text
-                        await streamer.append(text)
-
-                    tool_info = self._extract_tool_use(event)
-                    if tool_info:
-                        await streamer.send_tool_notification(*tool_info)
-
-                # Read remaining stderr
-                stderr_data = await process.stderr.read()
-                if stderr_data:
-                    stderr_chunks.append(stderr_data)
-
-                await process.wait()
+                # Read remaining stderr — with timeout
+                try:
+                    stderr_data = await asyncio.wait_for(
+                        process.stderr.read(), timeout=10,
+                    )
+                    if stderr_data:
+                        stderr_chunks.append(stderr_data)
+                except asyncio.TimeoutError:
+                    log.warning("Timed out reading stderr from codex process")
                 stderr_str = b"".join(stderr_chunks).decode(errors="replace")
 
                 # Combine stderr and any JSON error events
