@@ -33,6 +33,7 @@ class ExecutionRequest:
     source: str  # "telegram" | "apiary"
     apiary_task_id: str | None = None
     branch: str | None = None
+    image_paths: list[str] | None = None
 
 
 _modules = discover_modules()
@@ -63,7 +64,7 @@ class CodexExecutor:
         self,
         config: Config,
         apiary: ApiaryClient | None,
-        gateway: TelegramGateway,
+        gateway: TelegramGateway | None,
         persona: str | None = None,
     ) -> None:
         self._config = config
@@ -298,6 +299,13 @@ class CodexExecutor:
                     await watcher_task
                 except asyncio.CancelledError:
                     pass
+            # Clean up temp media files
+            if req.image_paths:
+                for p in req.image_paths:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
             self._active_count -= 1
             if self._active_count == 0 and self._apiary:
                 try:
@@ -333,6 +341,7 @@ class CodexExecutor:
             )
 
             full_text = ""
+            dedup = _EventDeduplicator()
             async for line in process.stdout:
                 if claim_expired.is_set():
                     log.warning("Dream task %s claim expired during execution", task_id)
@@ -345,7 +354,7 @@ class CodexExecutor:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                text = self._extract_text(event)
+                text = dedup.extract_text(event)
                 if text:
                     full_text += text
 
@@ -397,6 +406,8 @@ class CodexExecutor:
             ]
             if self._config.codex_model:
                 cmd.extend(["--model", self._config.codex_model])
+            if self._config.codex_reasoning_effort:
+                cmd.extend(["-c", f"model_reasoning_effort={self._config.codex_reasoning_effort}"])
             cmd.extend([session_id, full_prompt])
         else:
             cmd = [
@@ -407,6 +418,8 @@ class CodexExecutor:
             ]
             if self._config.codex_model:
                 cmd.extend(["--model", self._config.codex_model])
+            if self._config.codex_reasoning_effort:
+                cmd.extend(["-c", f"model_reasoning_effort={self._config.codex_reasoning_effort}"])
             cmd.append(full_prompt)
         return cmd
 
@@ -461,10 +474,26 @@ class CodexExecutor:
 
         effective_cwd = cwd_override or self._config.codex_working_dir
 
+        # Prepend image references so Codex reads them via the Read tool
+        prompt_text = req.prompt
+        if req.image_paths:
+            image_refs = "\n".join(f"- {p}" for p in req.image_paths)
+            prompt_text = (
+                f"The user sent these images. Read them first, then respond.\n"
+                f"{image_refs}\n\n{prompt_text}"
+            )
+
+        # Cap prompt size — the CLI passes it as a positional arg,
+        # which must fit in ARG_MAX (~2MB, often less in containers).
+        _MAX_PROMPT = 500_000  # 500KB safe limit
+        if len(prompt_text) > _MAX_PROMPT:
+            log.warning("Prompt too large (%dKB), truncating", len(prompt_text) // 1024)
+            prompt_text = prompt_text[:_MAX_PROMPT] + "\n... (truncated)"
+
         for attempt in range(1, retries + 1):
             try:
                 cmd = self._build_codex_command(
-                    prompt=req.prompt,
+                    prompt=prompt_text,
                     session_id=resume_id,
                     cwd=effective_cwd,
                     system_prompt_append=system_prompt_append,
@@ -492,6 +521,7 @@ class CodexExecutor:
                 # timeout if the process dies but grandchild pipes stay open.
                 async def _drain_stdout():
                     nonlocal full_text
+                    dedup = _EventDeduplicator()
                     async for line in process.stdout:
                         line = line.strip()
                         if not line:
@@ -515,49 +545,56 @@ class CodexExecutor:
                         if sid and req.source == "telegram":
                             self._sessions.set(req.chat_id, sid)
 
-                        text = self._extract_text(event)
+                        text = dedup.extract_text(event)
                         if text:
                             full_text += text
                             await streamer.append(text)
 
-                        tool_info = self._extract_tool_use(event)
+                        tool_info = dedup.extract_tool_use(event)
                         if tool_info:
                             await streamer.send_tool_notification(*tool_info)
 
                 drain_task = asyncio.create_task(_drain_stdout())
                 wait_task = asyncio.create_task(process.wait())
 
-                # Wait for both drain and process exit.  When the process
-                # exits, give the drain 30s to finish (grandchild processes
-                # may hold pipes open).  If drain finishes first, wait()
-                # will follow almost instantly.
-                done, pending = await asyncio.wait(
-                    [drain_task, wait_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-
-                for p in pending:
-                    try:
-                        await asyncio.wait_for(asyncio.shield(p), timeout=30)
-                    except asyncio.TimeoutError:
-                        log.warning(
-                            "Codex process or stdout drain timed out after 30s — "
-                            "killing (pid=%s, rc=%s)",
-                            process.pid, process.returncode,
-                        )
-                        p.cancel()
-                        try:
-                            await p
-                        except asyncio.CancelledError:
-                            pass
-
-                # Ensure process is dead
-                if process.returncode is None:
+                # Wait for both drain and process exit with an overall
+                # execution timeout (default 20 min).  Prevents runaway
+                # tasks from blocking the queue indefinitely.
+                _MAX_EXECUTION_SECS = 30 * 60
+                try:
+                    done, pending = await asyncio.wait_for(
+                        asyncio.wait(
+                            [drain_task, wait_task],
+                            return_when=asyncio.ALL_COMPLETED,
+                        ),
+                        timeout=_MAX_EXECUTION_SECS,
+                    )
+                except asyncio.TimeoutError:
+                    log.warning(
+                        "Codex execution timed out after %ds — killing process (pid=%s)",
+                        _MAX_EXECUTION_SECS, process.pid,
+                    )
+                    # Kill process FIRST so pipes close, then cancel tasks
                     try:
                         process.kill()
                     except ProcessLookupError:
                         pass
-                    await process.wait()
+                    pending = {drain_task, wait_task}
+
+                for p in pending:
+                    if not p.done():
+                        p.cancel()
+                        try:
+                            await asyncio.wait_for(p, timeout=5)
+                        except (asyncio.CancelledError, asyncio.TimeoutError):
+                            pass
+
+                # Ensure process is reaped
+                if process.returncode is None:
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        pass
 
                 # Read remaining stderr — with timeout
                 try:
@@ -601,7 +638,12 @@ class CodexExecutor:
 
             except _CodexProcessError as e:
                 err_str = str(e)
-                is_rate_limit = "rate_limit" in err_str.lower() or "rate limit" in err_str.lower()
+                is_rate_limit = (
+                    "rate_limit" in err_str.lower()
+                    or "rate limit" in err_str.lower()
+                    or "at capacity" in err_str.lower()
+                    or "overloaded" in err_str.lower()
+                )
                 is_auth_error = (
                     "authentication" in err_str.lower()
                     or "invalid api key" in err_str.lower()
@@ -777,6 +819,119 @@ class CodexExecutor:
                     continue
                 return val
         return None
+
+
+class _EventDeduplicator:
+    """Filters duplicate text and tool events from the Codex CLI JSONL stream.
+
+    The Codex CLI emits overlapping events: streaming deltas AND completed
+    message/item summaries containing the same text.  Similarly, a single
+    tool invocation can fire multiple event types.  This class filters
+    duplicates so each piece of content triggers only one Telegram API call.
+    """
+
+    def __init__(self) -> None:
+        self._saw_delta: bool = False
+        self._seen_tool_keys: set[str] = set()
+
+    def extract_text(self, event: dict) -> str:
+        """Extract text, preferring deltas and skipping duplicate completed messages."""
+        etype = event.get("type", "")
+
+        # New response turn resets delta tracking
+        if etype in ("response.created", "response.started"):
+            self._saw_delta = False
+            return ""
+
+        # Streaming deltas — always use, mark that we're receiving them
+        if etype in ("response.output_text.delta", "content_block_delta"):
+            self._saw_delta = True
+            return event.get("delta", event.get("text", ""))
+
+        # Simple text event (also streaming)
+        if etype == "text" and "text" in event:
+            self._saw_delta = True
+            return event["text"]
+
+        # Completed message — only use as fallback when no deltas were seen
+        if etype == "message" and event.get("role") == "assistant":
+            if self._saw_delta:
+                return ""
+            parts = []
+            for block in event.get("content", []):
+                if isinstance(block, dict) and block.get("type") in ("output_text", "text"):
+                    parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "".join(parts)
+
+        # item.completed with agent_message — skip if deltas were seen
+        if etype == "item.completed":
+            if self._saw_delta:
+                return ""
+            item = event.get("item", {})
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                return item.get("text", "")
+
+        return ""
+
+    def extract_tool_use(self, event: dict) -> tuple[str, object] | None:
+        """Extract tool use, deduplicating by call ID or name+args."""
+        etype = event.get("type", "")
+
+        name: str | None = None
+        args: object = {}
+        call_id = ""
+
+        if etype == "function_call":
+            name = event.get("name", "unknown")
+            args = event.get("arguments", {})
+            call_id = event.get("call_id", event.get("id", ""))
+        elif etype in ("tool_call", "tool_use"):
+            name = event.get("name", event.get("function", {}).get("name", "unknown"))
+            args = event.get("input", event.get("arguments", event.get("function", {}).get("arguments", {})))
+            call_id = event.get("call_id", event.get("id", ""))
+        elif etype == "item.started":
+            # Only match command_execution — shell commands are exclusively
+            # reported via item.started, not via function_call.
+            item = event.get("item", {})
+            if isinstance(item, dict) and item.get("type") == "command_execution":
+                cmd = item.get("command", "")
+                if cmd.startswith("/bin/bash -lc '") and cmd.endswith("'"):
+                    cmd = cmd[15:-1]
+                elif cmd.startswith("/bin/bash -lc "):
+                    cmd = cmd[14:]
+                name = "shell"
+                args = {"command": cmd}
+                call_id = item.get("call_id", item.get("id", ""))
+            else:
+                return None
+        else:
+            # Skip nested-item wrappers for function_call/tool_call/tool_use —
+            # these duplicate the top-level events handled above.
+            return None
+
+        if name is None:
+            return None
+
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {"raw": args}
+
+        # Deduplicate by call_id when available, else by name + args prefix
+        if call_id:
+            dedup_key = f"id:{call_id}"
+        else:
+            args_str = str(args)[:200]
+            dedup_key = f"na:{name}:{args_str}"
+
+        if dedup_key in self._seen_tool_keys:
+            return None
+        self._seen_tool_keys.add(dedup_key)
+
+        return (name, args)
 
 
 class _CodexProcessError(Exception):

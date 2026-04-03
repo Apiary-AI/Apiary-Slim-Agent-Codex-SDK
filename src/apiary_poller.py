@@ -86,6 +86,7 @@ async def run_apiary_poller(
     log.info("Apiary poller started (interval=%ds)", config.apiary_poll_interval)
 
     persona_version: int | None = None
+    platform_context_version: int | None = None
     recent_webhook_entities: dict[str, tuple[float, str]] = {}  # entity_key -> (mono_ts, primary_task_id)
     task_claim_counts: dict[str, int] = {}  # task_id -> number of times claimed
     _failed_tasks: set[str] = set()  # tasks we already failed on the server
@@ -98,19 +99,29 @@ async def run_apiary_poller(
             except Exception:
                 log.exception("Heartbeat failed")
 
-            # Check for persona changes
+            # Check for persona / platform context changes
             try:
-                ver_data = await apiary.get_persona_version(known_version=persona_version)
+                ver_data = await apiary.get_persona_version(
+                    known_version=persona_version,
+                    known_platform_version=platform_context_version,
+                )
                 data = ver_data.get("data", ver_data) if isinstance(ver_data, dict) else {}
                 changed = data.get("changed", False)
                 server_version = data.get("version")
+                server_platform_version = data.get("platform_context_version")
                 if changed or (server_version is not None and server_version != persona_version):
                     new_persona = await apiary.get_persona_assembled()
                     executor.update_persona(new_persona)
                     persona_version = server_version
-                    log.info("Persona refreshed (version=%s)", persona_version)
+                    if server_platform_version is not None:
+                        platform_context_version = server_platform_version
+                    log.info("Persona refreshed (version=%s, platform=%s)",
+                             persona_version, platform_context_version)
                 elif persona_version is None and server_version is not None:
                     persona_version = server_version  # initial sync
+                # Track platform context version even when persona hasn't changed
+                if server_platform_version is not None and platform_context_version is None:
+                    platform_context_version = server_platform_version
             except Exception:
                 log.debug("Persona version check failed", exc_info=True)
 
@@ -191,6 +202,11 @@ async def run_apiary_poller(
                         context_json = json.dumps(
                             context_data, indent=2, ensure_ascii=False, default=str,
                         )
+                        # Cap payload size to avoid "Argument list too long" when
+                        # the Codex CLI receives the full prompt as a CLI arg.
+                        max_payload = 50_000  # ~50KB
+                        if len(context_json) > max_payload:
+                            context_json = context_json[:max_payload] + "\n... (truncated)"
                         prompt = (
                             f"{prompt}\n\n---\n\n"
                             f"**Task payload data:**\n```json\n{context_json}\n```"
@@ -227,10 +243,11 @@ async def run_apiary_poller(
                             _failed_tasks.add(task_id)
                         continue
 
-                    # Don't claim new tasks while the executor is busy.
-                    # Claiming eagerly causes claim timeouts for queued tasks,
-                    # which sends them back to pending and creates a retry storm.
-                    if not executor.has_free_slots:
+                    # Dream tasks bypass capacity check — they run in background
+                    # without consuming a semaphore slot or Telegram output.
+                    is_dream = task.get("type") == "dream"
+
+                    if not is_dream and not executor.has_free_slots:
                         log.debug("Executor at capacity (%d slots), deferring remaining tasks",
                                   config.codex_max_parallel)
                         break
@@ -242,6 +259,12 @@ async def run_apiary_poller(
                         continue
 
                     task_claim_counts[task_id] = prior_claims + 1
+
+                    if is_dream:
+                        asyncio.create_task(executor.run_dream(task_id, prompt))
+                        log.info("Dream task %s started in background", task_id)
+                        continue
+
                     executor.add_apiary_task(task_id)
 
                     chat_id = config.telegram_chat_id
