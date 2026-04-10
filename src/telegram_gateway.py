@@ -56,7 +56,7 @@ class TelegramGateway:
         self,
         bot: Bot,
         *,
-        min_interval: float = 0.35,
+        min_interval: float = 1.0,
         max_backoff: float = 120.0,
         circuit_threshold: int = 5,
     ) -> None:

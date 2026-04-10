@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 # Telegram message text limit (leave margin for formatting)
 MAX_MSG_LEN = 4000
-MIN_EDIT_INTERVAL = 1.5  # seconds between edits (per-streamer)
+MIN_EDIT_INTERVAL = 5.0  # seconds between edits (per-streamer)
 
 # -- Human-readable tool descriptions ----------------------------------------
 
