@@ -95,16 +95,15 @@ async def test_execute_removes_task_after_claim_expiry(executor):
 
 # --- _build_codex_command uses cwd override when provided ---
 
-def test_build_codex_command_default(executor, mock_config):
-    mock_config.codex_model = "codex-5.3"
-    mock_config.codex_max_turns = 5
+def test_build_codex_command_default(executor, mock_runtime):
+    mock_runtime.model = "gpt-5.4"
     cmd = executor._build_codex_command("hello")
     assert "codex" == cmd[0]
     assert "exec" == cmd[1]
     assert "--json" in cmd
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     assert "--model" in cmd
-    assert "codex-5.3" in cmd
+    assert "gpt-5.4" in cmd
     assert "hello" in cmd
     # prompt is a positional arg, not behind -p
     assert "-p" not in cmd
@@ -136,14 +135,14 @@ def test_build_codex_command_no_system_prompt_when_persona_none(executor, mock_c
     assert "--system-prompt" not in cmd
 
 
-def test_build_codex_command_no_model_when_empty(executor, mock_config):
-    mock_config.codex_model = ""
+def test_build_codex_command_no_model_when_empty(executor, mock_runtime):
+    mock_runtime.model = ""
     cmd = executor._build_codex_command("hello")
     assert "--model" not in cmd
 
 
-def test_build_codex_command_prompt_is_positional(executor, mock_config):
-    mock_config.codex_model = ""
+def test_build_codex_command_prompt_is_positional(executor, mock_runtime):
+    mock_runtime.model = ""
     cmd = executor._build_codex_command("hello world")
     # Prompt should be the last element as a positional arg
     assert cmd[-1] == "hello world"

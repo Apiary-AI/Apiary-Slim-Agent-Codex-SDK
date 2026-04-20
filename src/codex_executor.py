@@ -18,6 +18,7 @@ import httpx
 from .apiary_client import ApiaryClient
 from .config import Config
 from .module_loader import collect_mcp_servers, discover_modules
+from .runtime_config import RuntimeConfig
 from .session_store import SessionStore
 from .telegram_gateway import TelegramGateway
 from .telegram_streamer import TelegramStreamer
@@ -63,11 +64,13 @@ class CodexExecutor:
     def __init__(
         self,
         config: Config,
+        runtime: RuntimeConfig,
         apiary: ApiaryClient | None,
         gateway: TelegramGateway | None,
         persona: str | None = None,
     ) -> None:
         self._config = config
+        self._runtime = runtime
         self._apiary = apiary
         self._gateway = gateway
         self._persona = persona
@@ -404,10 +407,10 @@ class CodexExecutor:
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
             ]
-            if self._config.codex_model:
-                cmd.extend(["--model", self._config.codex_model])
-            if self._config.codex_reasoning_effort:
-                cmd.extend(["-c", f"model_reasoning_effort={self._config.codex_reasoning_effort}"])
+            if self._runtime.model:
+                cmd.extend(["--model", self._runtime.model])
+            if self._runtime.effort:
+                cmd.extend(["-c", f"model_reasoning_effort={self._runtime.effort}"])
             cmd.extend([session_id, full_prompt])
         else:
             cmd = [
@@ -416,10 +419,10 @@ class CodexExecutor:
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
             ]
-            if self._config.codex_model:
-                cmd.extend(["--model", self._config.codex_model])
-            if self._config.codex_reasoning_effort:
-                cmd.extend(["-c", f"model_reasoning_effort={self._config.codex_reasoning_effort}"])
+            if self._runtime.model:
+                cmd.extend(["--model", self._runtime.model])
+            if self._runtime.effort:
+                cmd.extend(["-c", f"model_reasoning_effort={self._runtime.effort}"])
             cmd.append(full_prompt)
         return cmd
 
@@ -657,6 +660,22 @@ class CodexExecutor:
                         "Shutting down."
                     )
                     sys.exit(1)
+
+                # Transient API errors (500, overloaded) — retry with backoff
+                is_api_500 = (
+                    "internal server error" in err_str.lower()
+                    or "api_error" in err_str.lower()
+                    or "overloaded" in err_str.lower()
+                )
+                if is_api_500 and attempt < retries:
+                    wait = 30 * attempt
+                    log.warning(
+                        "API server error (attempt %d/%d), retrying in %ds: %s",
+                        attempt, retries, wait, err_str[:100],
+                    )
+                    await streamer.append(f"\n\u23f3 API error, retrying in {wait}s...\n")
+                    await asyncio.sleep(wait)
+                    continue
 
                 # Don't retry if execution already produced output — side
                 # effects (GitHub comments, commits, etc.) cannot be undone.

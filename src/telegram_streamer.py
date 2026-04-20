@@ -16,6 +16,7 @@ from typing import Any
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest
 
+from .redactor import redact
 from .telegram_gateway import TelegramGateway
 
 log = logging.getLogger(__name__)
@@ -161,7 +162,7 @@ class TelegramStreamer:
         """Append text to the stream. Edits the current message if enough time passed."""
         if not text or not self._gateway:
             return
-        self._buffer += text
+        self._buffer += redact(text)
 
         try:
             # Send first message once we have content
@@ -234,7 +235,7 @@ class TelegramStreamer:
             self._buffer = ""
 
         self._tool_count += 1
-        self._status_description = _humanize_tool(tool_name, tool_input)
+        self._status_description = redact(_humanize_tool(tool_name, tool_input))
         self._status_started = time.monotonic()
 
         # Cancel previous ticker if running
@@ -286,7 +287,7 @@ class TelegramStreamer:
             return
         try:
             await self._gateway.send_message(
-                self._chat_id, f"\u274c {error_text}",
+                self._chat_id, f"\u274c {redact(error_text)}",
             )
         except Exception:
             log.warning("Failed to send error message to Telegram", exc_info=True)

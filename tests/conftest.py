@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from src.config import Config
 from src.codex_executor import CodexExecutor
+from src.runtime_config import RuntimeConfig
 
 
 @pytest.fixture
@@ -42,10 +43,15 @@ def mock_gateway():
 
 
 @pytest.fixture
-def executor(mock_config, mock_apiary, mock_gateway):
-    return CodexExecutor(mock_config, mock_apiary, mock_gateway)
+def mock_runtime():
+    return RuntimeConfig(model="gpt-5.4", effort="high")
 
 
 @pytest.fixture
-def executor_with_persona(mock_config, mock_apiary, mock_gateway):
-    return CodexExecutor(mock_config, mock_apiary, mock_gateway, persona="You are a helpful assistant.")
+def executor(mock_config, mock_runtime, mock_apiary, mock_gateway):
+    return CodexExecutor(mock_config, mock_runtime, mock_apiary, mock_gateway)
+
+
+@pytest.fixture
+def executor_with_persona(mock_config, mock_runtime, mock_apiary, mock_gateway):
+    return CodexExecutor(mock_config, mock_runtime, mock_apiary, mock_gateway, persona="You are a helpful assistant.")

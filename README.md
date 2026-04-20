@@ -178,6 +178,8 @@ tests/
 
 - Send any text message to your Telegram bot -- Codex processes it and streams the response back
 - `/status` -- check queue depth
+- `/model [<id>|list]` -- show or change the model. Any valid id is accepted; `/model list` prints known ids. Persists across restarts.
+- `/effort [minimal|low|medium|high|xhigh]` -- show or change reasoning effort. Persists across restarts.
 - `/new` -- clear session (start fresh conversation)
 - `/restart` -- restart the agent
 - Apiary tasks are automatically polled, claimed, executed, and completed
