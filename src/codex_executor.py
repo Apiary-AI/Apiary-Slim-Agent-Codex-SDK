@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 
-from .apiary_client import ApiaryClient
+from .superpos_client import SuperposClient
 from .config import Config
 from .module_loader import collect_mcp_servers, discover_modules
 from .runtime_config import RuntimeConfig
@@ -31,8 +31,8 @@ log = logging.getLogger(__name__)
 class ExecutionRequest:
     prompt: str
     chat_id: int | str
-    source: str  # "telegram" | "apiary"
-    apiary_task_id: str | None = None
+    source: str  # "telegram" | "superpos"
+    superpos_task_id: str | None = None
     branch: str | None = None
     image_paths: list[str] | None = None
 
@@ -65,19 +65,19 @@ class CodexExecutor:
         self,
         config: Config,
         runtime: RuntimeConfig,
-        apiary: ApiaryClient | None,
+        superpos: SuperposClient | None,
         gateway: TelegramGateway | None,
         persona: str | None = None,
     ) -> None:
         self._config = config
         self._runtime = runtime
-        self._apiary = apiary
+        self._superpos = superpos
         self._gateway = gateway
         self._persona = persona
         self._inject_persona_into_agents_md()
         self._sessions = SessionStore()
         self.queue: asyncio.Queue[ExecutionRequest] = asyncio.Queue()
-        self._in_flight_apiary_tasks: set[str] = set()
+        self._in_flight_superpos_tasks: set[str] = set()
         self._semaphore = asyncio.Semaphore(config.codex_max_parallel)
         self._worktree_locks: dict[str, asyncio.Lock] = {}
         self._active_count: int = 0
@@ -135,16 +135,16 @@ class CodexExecutor:
         the semaphore, OR actively executing.  ``queue.qsize()`` and
         ``_active_count`` both miss the semaphore-waiting gap.
         """
-        return len(self._in_flight_apiary_tasks) < self._config.codex_max_parallel
+        return len(self._in_flight_superpos_tasks) < self._config.codex_max_parallel
 
-    def add_apiary_task(self, task_id: str) -> None:
-        self._in_flight_apiary_tasks.add(task_id)
+    def add_superpos_task(self, task_id: str) -> None:
+        self._in_flight_superpos_tasks.add(task_id)
 
-    def remove_apiary_task(self, task_id: str) -> None:
-        self._in_flight_apiary_tasks.discard(task_id)
+    def remove_superpos_task(self, task_id: str) -> None:
+        self._in_flight_superpos_tasks.discard(task_id)
 
-    def has_apiary_task(self, task_id: str) -> bool:
-        return task_id in self._in_flight_apiary_tasks
+    def has_superpos_task(self, task_id: str) -> bool:
+        return task_id in self._in_flight_superpos_tasks
 
     def clear_session(self, chat_id: int | str) -> None:
         """Clear the stored session for a chat, starting fresh next message."""
@@ -177,15 +177,15 @@ class CodexExecutor:
 
         # Start heartbeat IMMEDIATELY — before semaphore/worktree waits.
         # This keeps the server-side claim alive while queued.
-        if req.source == "apiary" and req.apiary_task_id and self._apiary:
+        if req.source == "superpos" and req.superpos_task_id and self._superpos:
             progress_task = asyncio.create_task(
-                self._report_progress(req.apiary_task_id, claim_expired)
+                self._report_progress(req.superpos_task_id, claim_expired)
             )
 
         try:
             async with self._semaphore:
                 if claim_expired.is_set():
-                    log.warning("Claim expired while waiting for semaphore: %s", req.apiary_task_id)
+                    log.warning("Claim expired while waiting for semaphore: %s", req.superpos_task_id)
                     return
 
                 slot = self._resolve_slot(req)
@@ -211,7 +211,7 @@ class CodexExecutor:
                         # Release lock if we got it while also expiring
                         if lock_task in done and lock_task.result():
                             wt_lock.release()
-                        log.warning("Claim expired while waiting for worktree lock: %s", req.apiary_task_id)
+                        log.warning("Claim expired while waiting for worktree lock: %s", req.superpos_task_id)
                         return
 
                     lock_acquired = True
@@ -234,20 +234,20 @@ class CodexExecutor:
                     await progress_task
                 except asyncio.CancelledError:
                     pass
-            if req.apiary_task_id:
-                self.remove_apiary_task(req.apiary_task_id)
+            if req.superpos_task_id:
+                self.remove_superpos_task(req.superpos_task_id)
             self.queue.task_done()
 
     async def _report_progress(
         self, task_id: str, claim_expired: asyncio.Event, interval: int = 30
     ) -> None:
-        """Send periodic progress updates to keep the Apiary task alive."""
+        """Send periodic progress updates to keep the Superpos task alive."""
         progress = 5
         while True:
             await asyncio.sleep(interval)
             progress = min(progress + 5, 95)
             try:
-                await self._apiary.update_progress(task_id, progress)
+                await self._superpos.update_progress(task_id, progress)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 409:
                     log.warning("Claim expired for task %s (409); aborting execution", task_id)
@@ -261,9 +261,9 @@ class CodexExecutor:
         self, req: ExecutionRequest, claim_expired: asyncio.Event, retries: int = 3,
     ) -> None:
         self._active_count += 1
-        if self._active_count == 1 and self._apiary:
+        if self._active_count == 1 and self._superpos:
             try:
-                await self._apiary.update_status("busy")
+                await self._superpos.update_status("busy")
             except Exception:
                 log.debug("Failed to set agent status to busy")
 
@@ -283,15 +283,15 @@ class CodexExecutor:
 
         try:
             inner_task = asyncio.create_task(self._execute_inner(req, streamer, retries))
-            if req.source == "apiary" and req.apiary_task_id:
+            if req.source == "superpos" and req.superpos_task_id:
                 watcher_task = asyncio.create_task(_watch_claim_expiry())
             try:
                 await inner_task
             except asyncio.CancelledError:
                 if claim_expired.is_set():
                     log.warning(
-                        "Execution aborted: claim expired for apiary task %s",
-                        req.apiary_task_id,
+                        "Execution aborted: claim expired for superpos task %s",
+                        req.superpos_task_id,
                     )
                 else:
                     raise
@@ -310,9 +310,9 @@ class CodexExecutor:
                     except OSError:
                         pass
             self._active_count -= 1
-            if self._active_count == 0 and self._apiary:
+            if self._active_count == 0 and self._superpos:
                 try:
-                    await self._apiary.update_status("online")
+                    await self._superpos.update_status("online")
                 except Exception:
                     log.debug("Failed to set agent status to online")
 
@@ -323,7 +323,7 @@ class CodexExecutor:
         # Progress heartbeat keeps the claim alive during reflection
         claim_expired = asyncio.Event()
         progress_task: asyncio.Task | None = None
-        if self._apiary:
+        if self._superpos:
             progress_task = asyncio.create_task(
                 self._report_progress(task_id, claim_expired)
             )
@@ -368,14 +368,14 @@ class CodexExecutor:
                 "description": "Dream: automated reflection on recent work",
                 "output_excerpt": full_text[:500] if full_text else None,
             }
-            if self._apiary and not claim_expired.is_set():
-                await self._apiary.complete_task(task_id, result, summary=summary)
+            if self._superpos and not claim_expired.is_set():
+                await self._superpos.complete_task(task_id, result, summary=summary)
             log.info("Dream task %s completed", task_id)
         except Exception:
             log.warning("Dream task %s failed", task_id, exc_info=True)
-            if self._apiary and not claim_expired.is_set():
+            if self._superpos and not claim_expired.is_set():
                 try:
-                    await self._apiary.fail_task(task_id, "Dream reflection failed")
+                    await self._superpos.fail_task(task_id, "Dream reflection failed")
                 except Exception:
                     pass
         finally:
@@ -470,7 +470,7 @@ class CodexExecutor:
                 "For conversational replies or read-only tasks, skip this entirely."
             )
 
-        # Telegram messages resume the chat session; Apiary tasks run fresh
+        # Telegram messages resume the chat session; Superpos tasks run fresh
         resume_id = None
         if req.source == "telegram":
             resume_id = self._sessions.get(req.chat_id)
@@ -619,8 +619,8 @@ class CodexExecutor:
 
                 await streamer.finish()
 
-                # Complete Apiary task if applicable
-                if req.source == "apiary" and req.apiary_task_id and self._apiary:
+                # Complete Superpos task if applicable
+                if req.source == "superpos" and req.superpos_task_id and self._superpos:
                     result = full_text[-2000:] if len(full_text) > 2000 else full_text
                     elapsed = int(time.monotonic() - t0)
                     summary = {
@@ -629,13 +629,13 @@ class CodexExecutor:
                         "duration_seconds": elapsed,
                     }
                     try:
-                        await self._apiary.complete_task(
-                            req.apiary_task_id, result, summary=summary,
+                        await self._superpos.complete_task(
+                            req.superpos_task_id, result, summary=summary,
                         )
                     except Exception:
                         log.warning(
-                            "Failed to complete apiary task %s — claim may have expired",
-                            req.apiary_task_id, exc_info=True,
+                            "Failed to complete superpos task %s — claim may have expired",
+                            req.superpos_task_id, exc_info=True,
                         )
                 return
 
@@ -705,7 +705,7 @@ class CodexExecutor:
                     log.warning("CancelledError while sending error to Telegram (suppressed)")
                 except Exception:
                     log.warning("Failed to send error notification", exc_info=True)
-                if req.source == "apiary" and req.apiary_task_id and self._apiary:
+                if req.source == "superpos" and req.superpos_task_id and self._superpos:
                     elapsed = int(time.monotonic() - t0)
                     summary = {
                         "description": req.prompt[:200],
@@ -713,11 +713,11 @@ class CodexExecutor:
                         "duration_seconds": elapsed,
                     }
                     try:
-                        await self._apiary.fail_task(
-                            req.apiary_task_id, err_str, summary=summary,
+                        await self._superpos.fail_task(
+                            req.superpos_task_id, err_str, summary=summary,
                         )
                     except Exception:
-                        log.warning("Failed to mark apiary task %s as failed", req.apiary_task_id)
+                        log.warning("Failed to mark superpos task %s as failed", req.superpos_task_id)
                 return
 
             except Exception as e:
@@ -729,7 +729,7 @@ class CodexExecutor:
                     log.warning("CancelledError while sending error to Telegram (suppressed)")
                 except Exception:
                     log.warning("Failed to send error notification", exc_info=True)
-                if req.source == "apiary" and req.apiary_task_id and self._apiary:
+                if req.source == "superpos" and req.superpos_task_id and self._superpos:
                     elapsed = int(time.monotonic() - t0)
                     summary = {
                         "description": req.prompt[:200],
@@ -737,11 +737,11 @@ class CodexExecutor:
                         "duration_seconds": elapsed,
                     }
                     try:
-                        await self._apiary.fail_task(
-                            req.apiary_task_id, err_str, summary=summary,
+                        await self._superpos.fail_task(
+                            req.superpos_task_id, err_str, summary=summary,
                         )
                     except Exception:
-                        log.warning("Failed to mark apiary task %s as failed", req.apiary_task_id)
+                        log.warning("Failed to mark superpos task %s as failed", req.superpos_task_id)
                 return
 
     @staticmethod

@@ -12,7 +12,7 @@ def mock_config():
     cfg.codex_model = "codex-5.3"
     cfg.codex_max_turns = 5
     cfg.codex_working_dir = "/tmp"
-    cfg.apiary_poll_interval = 1
+    cfg.superpos_poll_interval = 1
     cfg.telegram_chat_id = "123"
     cfg.codex_max_parallel = 3
     cfg.openai_api_key = ""
@@ -20,7 +20,7 @@ def mock_config():
 
 
 @pytest.fixture
-def mock_apiary():
+def mock_superpos():
     a = AsyncMock()
     a.update_progress = AsyncMock()
     a.poll_tasks = AsyncMock(return_value=[])
@@ -48,10 +48,10 @@ def mock_runtime():
 
 
 @pytest.fixture
-def executor(mock_config, mock_runtime, mock_apiary, mock_gateway):
-    return CodexExecutor(mock_config, mock_runtime, mock_apiary, mock_gateway)
+def executor(mock_config, mock_runtime, mock_superpos, mock_gateway):
+    return CodexExecutor(mock_config, mock_runtime, mock_superpos, mock_gateway)
 
 
 @pytest.fixture
-def executor_with_persona(mock_config, mock_runtime, mock_apiary, mock_gateway):
-    return CodexExecutor(mock_config, mock_runtime, mock_apiary, mock_gateway, persona="You are a helpful assistant.")
+def executor_with_persona(mock_config, mock_runtime, mock_superpos, mock_gateway):
+    return CodexExecutor(mock_config, mock_runtime, mock_superpos, mock_gateway, persona="You are a helpful assistant.")

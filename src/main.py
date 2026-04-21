@@ -11,8 +11,8 @@ import signal
 import sys
 from asyncio.subprocess import PIPE
 
-from .apiary_client import ApiaryClient
-from .apiary_poller import run_apiary_poller
+from .superpos_client import SuperposClient
+from .superpos_poller import run_superpos_poller
 from .codex_executor import CodexExecutor
 from .config import Config
 from .runtime_config import RuntimeConfig
@@ -116,18 +116,18 @@ async def main() -> None:
     # Verify Codex auth before starting anything else
     await _check_codex_auth()
 
-    # Apiary client (optional)
-    apiary: ApiaryClient | None = None
-    if config.apiary_enabled:
-        apiary = ApiaryClient(config)
-        log.info("Apiary integration enabled (%s)", config.apiary_base_url)
+    # Superpos client (optional)
+    superpos: SuperposClient | None = None
+    if config.superpos_enabled:
+        superpos = SuperposClient(config)
+        log.info("Superpos integration enabled (%s)", config.superpos_base_url)
         try:
-            await apiary.update_status("online")
+            await superpos.update_status("online")
             log.info("Agent status set to online")
         except Exception:
             log.warning("Failed to set agent status to online", exc_info=True)
     else:
-        log.info("Apiary integration disabled (missing config)")
+        log.info("Superpos integration disabled (missing config)")
 
     # Telegram app + centralized gateway (optional)
     bot_app = None
@@ -141,9 +141,9 @@ async def main() -> None:
 
     # Fetch persona at startup
     persona: str | None = None
-    if apiary:
+    if superpos:
         try:
-            persona = await apiary.get_persona_assembled()
+            persona = await superpos.get_persona_assembled()
             if persona:
                 log.info("Persona loaded (version from assembled endpoint)")
             else:
@@ -156,7 +156,7 @@ async def main() -> None:
     log.info("Runtime: model=%s, effort=%s", runtime.model, runtime.effort)
 
     # Executor
-    executor = CodexExecutor(config, runtime, apiary, gateway, persona=persona)
+    executor = CodexExecutor(config, runtime, superpos, gateway, persona=persona)
     log.info("Executor: max_parallel=%d, worktree_isolation=%s",
              config.codex_max_parallel, config.codex_worktree_isolation)
 
@@ -165,11 +165,11 @@ async def main() -> None:
     if bot_app and gateway:
         tasks.append(run_telegram_bot(bot_app, executor, config, runtime))
         tasks.append(gateway.run())
-    if apiary:
-        tasks.append(run_apiary_poller(apiary, executor, config))
+    if superpos:
+        tasks.append(run_superpos_poller(superpos, executor, config))
 
     if len(tasks) == 1:
-        log.error("Neither Telegram nor Apiary is configured — nothing to do")
+        log.error("Neither Telegram nor Superpos is configured — nothing to do")
         sys.exit(1)
 
     # Graceful shutdown on SIGTERM/SIGINT
@@ -192,13 +192,13 @@ async def main() -> None:
     try:
         await asyncio.gather(*tasks)
     finally:
-        if apiary:
+        if superpos:
             try:
-                await apiary.update_status("offline")
+                await superpos.update_status("offline")
                 log.info("Agent status set to offline")
             except Exception:
                 log.debug("Failed to set agent status to offline (shutdown)")
-            await apiary.close()
+            await superpos.close()
 
 
 def _shutdown(loop: asyncio.AbstractEventLoop) -> None:

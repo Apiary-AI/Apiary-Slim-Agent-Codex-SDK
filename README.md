@@ -1,6 +1,6 @@
 # slim-codex-agent
 
-Docker agent that bridges **Apiary** and **Telegram** with **OpenAI Codex** as the brain.
+Docker agent that bridges **Superpos** and **Telegram** with **OpenAI Codex** as the brain.
 
 ## Setup
 
@@ -16,21 +16,21 @@ Fill in your `.env`:
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Yes | From @BotFather |
 | `TELEGRAM_ALLOWED_USERS` | Yes | Your Telegram user ID (comma-separated for multiple) |
-| `TELEGRAM_CHAT_ID` | No | Default chat for Apiary task notifications |
-| `APIARY_BASE_URL` | No | Your Apiary instance URL |
-| `APIARY_HIVE_ID` | No | Hive ID from Apiary UI |
-| `APIARY_AGENT_ID` | No | Agent ID from agent creation dialog |
-| `APIARY_API_TOKEN` | No | API Token from agent creation dialog |
-| `APIARY_REFRESH_TOKEN` | No | Refresh Token from agent creation dialog |
-| `APIARY_CAPABILITIES` | No | Comma-separated capabilities |
-| `APIARY_POLL_INTERVAL` | No | Poll interval in seconds (default: 5) |
+| `TELEGRAM_CHAT_ID` | No | Default chat for Superpos task notifications |
+| `SUPERPOS_BASE_URL` | No | Your Superpos instance URL |
+| `SUPERPOS_HIVE_ID` | No | Hive ID from Superpos UI |
+| `SUPERPOS_AGENT_ID` | No | Agent ID from agent creation dialog |
+| `SUPERPOS_API_TOKEN` | No | API Token from agent creation dialog |
+| `SUPERPOS_REFRESH_TOKEN` | No | Refresh Token from agent creation dialog |
+| `SUPERPOS_CAPABILITIES` | No | Comma-separated capabilities |
+| `SUPERPOS_POLL_INTERVAL` | No | Poll interval in seconds (default: 5) |
 | `OPENAI_API_KEY` | No | Only if not using OAuth |
 | `CODEX_MODEL` | No | Default: gpt-5.4 |
 | `CODEX_REASONING_EFFORT` | No | Reasoning effort: minimal, low, medium, high, xhigh (default: high) |
 | `CODEX_MAX_TURNS` | No | Default: 30 |
 | `CODEX_WORKING_DIR` | No | Default: /workspace |
 
-Apiary variables are optional -- if omitted, only the Telegram bot runs.
+Superpos variables are optional -- if omitted, only the Telegram bot runs.
 
 ### 2. Build
 
@@ -74,7 +74,7 @@ docker run --env-file .env slim-codex-agent
 
 ## Multi-agent setup (Docker Compose)
 
-Run multiple independent agents, each with its own Telegram bot and Apiary registration.
+Run multiple independent agents, each with its own Telegram bot and Superpos registration.
 
 ### 1. Create compose and env files
 
@@ -91,10 +91,10 @@ cp .env.example .env.agent2
 ```
 
 Fill in unique values per agent:
-- `APIARY_AGENT_ID` + `APIARY_API_TOKEN` (register each agent in Apiary dashboard)
+- `SUPERPOS_AGENT_ID` + `SUPERPOS_API_TOKEN` (register each agent in Superpos dashboard)
 - `TELEGRAM_BOT_TOKEN` (create separate bots via @BotFather)
 
-Shared values (Git, GitHub, Apiary URL/Hive) can be the same across all agents.
+Shared values (Git, GitHub, Superpos URL/Hive) can be the same across all agents.
 
 ### 2. Build
 
@@ -168,7 +168,7 @@ No credentials or environment variables needed -- everything is mocked.
 
 ```
 tests/
-  conftest.py          # shared fixtures (executor, mock_apiary, mock_config)
+  conftest.py          # shared fixtures (executor, mock_superpos, mock_config)
   test_executor.py     # dedup methods, _report_progress 409/500, claim-expiry cleanup
   test_poller.py       # skip in-flight tasks, claim+enqueue new tasks, skip malformed tasks
   test_telegram_bot.py # branch parsing, PR resolution, message handling
@@ -182,4 +182,4 @@ tests/
 - `/effort [minimal|low|medium|high|xhigh]` -- show or change reasoning effort. Persists across restarts.
 - `/new` -- clear session (start fresh conversation)
 - `/restart` -- restart the agent
-- Apiary tasks are automatically polled, claimed, executed, and completed
+- Superpos tasks are automatically polled, claimed, executed, and completed
