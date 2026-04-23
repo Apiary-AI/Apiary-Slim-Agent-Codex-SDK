@@ -24,10 +24,11 @@ class RuntimeConfig:
         os.environ.get("HOME", "/home/agent"), ".codex", "runtime_config.json"
     )
     KNOWN_MODELS = (
+        "gpt-5.5",
+        "gpt-5.5-mini",
         "gpt-5.4",
         "gpt-5.4-mini",
         "gpt-5.3-codex",
-        "gpt-5.3-codex-spark",
         "o4-mini",
         "o3",
     )
