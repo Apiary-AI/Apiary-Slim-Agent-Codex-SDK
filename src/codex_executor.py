@@ -302,6 +302,12 @@ class CodexExecutor:
                     await watcher_task
                 except asyncio.CancelledError:
                     pass
+            # Always drain/close the streamer — idempotent, bounded by
+            # its own timeout so a wedged Telegram gateway can't hang us.
+            try:
+                await streamer.finish()
+            except Exception:
+                log.debug("Streamer finish failed (non-fatal)", exc_info=True)
             # Clean up temp media files
             if req.image_paths:
                 for p in req.image_paths:
@@ -317,10 +323,26 @@ class CodexExecutor:
                     log.debug("Failed to set agent status to online")
 
     async def run_dream(self, task_id: str, prompt: str) -> None:
-        """Execute a dream task in the background — no streamer, no semaphore."""
-        log.info("Dream task %s starting in background", task_id)
+        """Backwards-compatible alias for dream tasks."""
+        await self.run_background(task_id, prompt, task_type="dream")
 
-        # Progress heartbeat keeps the claim alive during reflection
+    async def run_background(
+        self,
+        task_id: str,
+        prompt: str,
+        task_type: str = "dream",
+        timeout_seconds: int = 300,
+    ) -> None:
+        """Execute a background task (dream, knowledge_fillin, …).
+
+        No streamer, no semaphore.  The inner subprocess loop runs inside a
+        child task so we can forcibly cancel it when the Superpos claim
+        expires or the overall timeout fires — otherwise a silent Codex
+        subprocess hangs the reader forever (TASK-stuck-dream scenario).
+        """
+        label = task_type.replace("_", " ")
+        log.info("%s task %s starting in background", label.capitalize(), task_id)
+
         claim_expired = asyncio.Event()
         progress_task: asyncio.Task | None = None
         if self._superpos:
@@ -328,7 +350,10 @@ class CodexExecutor:
                 self._report_progress(task_id, claim_expired)
             )
 
-        try:
+        full_text = ""
+
+        async def _run_inner() -> None:
+            nonlocal full_text
             cmd = self._build_codex_command(prompt=prompt)
             env = {**os.environ}
             if self._config.openai_api_key:
@@ -343,42 +368,105 @@ class CodexExecutor:
                 limit=16 * 1024 * 1024,
             )
 
-            full_text = ""
-            dedup = _EventDeduplicator()
-            async for line in process.stdout:
-                if claim_expired.is_set():
-                    log.warning("Dream task %s claim expired during execution", task_id)
-                    process.kill()
-                    return
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                text = dedup.extract_text(event)
-                if text:
-                    full_text += text
+            try:
+                dedup = _EventDeduplicator()
+                async for line in process.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    text = dedup.extract_text(event)
+                    if text:
+                        full_text += text
+                await process.wait()
+            finally:
+                # Ensure the subprocess is reaped when the inner task is
+                # cancelled (claim expiry, overall timeout).  Without this,
+                # the codex subprocess can linger and its stdout pipe keeps
+                # the reader attached indefinitely.
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5)
+                    except (asyncio.TimeoutError, Exception):
+                        pass
 
-            await process.wait()
+        inner_task: asyncio.Task | None = None
+        watcher_task: asyncio.Task | None = None
+
+        async def _watch_claim_expiry() -> None:
+            await claim_expired.wait()
+            if inner_task is not None and not inner_task.done():
+                inner_task.cancel()
+
+        expired = False
+        timed_out = False
+        try:
+            inner_task = asyncio.create_task(_run_inner())
+            watcher_task = asyncio.create_task(_watch_claim_expiry())
+            try:
+                await asyncio.wait_for(inner_task, timeout=timeout_seconds)
+            except asyncio.TimeoutError:
+                timed_out = True
+                log.warning(
+                    "%s task %s timed out after %ds — cancelling",
+                    label.capitalize(), task_id, timeout_seconds,
+                )
+                inner_task.cancel()
+                try:
+                    await inner_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            except asyncio.CancelledError:
+                if claim_expired.is_set():
+                    expired = True
+                    log.warning(
+                        "%s task %s cancelled: claim expired", label.capitalize(), task_id,
+                    )
+                else:
+                    raise
+
+            if expired:
+                return
+
+            if timed_out:
+                if self._superpos and not claim_expired.is_set():
+                    try:
+                        await self._superpos.fail_task(
+                            task_id, f"{label.capitalize()} timed out after {timeout_seconds}s",
+                        )
+                    except Exception:
+                        log.debug("Failed to mark timed-out task %s", task_id)
+                return
 
             result = full_text[-2000:] if len(full_text) > 2000 else full_text
             summary = {
-                "description": "Dream: automated reflection on recent work",
+                "description": f"{label.capitalize()}: automated background task",
                 "output_excerpt": full_text[:500] if full_text else None,
             }
             if self._superpos and not claim_expired.is_set():
                 await self._superpos.complete_task(task_id, result, summary=summary)
-            log.info("Dream task %s completed", task_id)
+            log.info("%s task %s completed", label.capitalize(), task_id)
         except Exception:
-            log.warning("Dream task %s failed", task_id, exc_info=True)
+            log.warning("%s task %s failed", label.capitalize(), task_id, exc_info=True)
             if self._superpos and not claim_expired.is_set():
                 try:
-                    await self._superpos.fail_task(task_id, "Dream reflection failed")
+                    await self._superpos.fail_task(task_id, f"{label.capitalize()} failed")
                 except Exception:
                     pass
         finally:
+            if watcher_task:
+                watcher_task.cancel()
+                try:
+                    await watcher_task
+                except asyncio.CancelledError:
+                    pass
             if progress_task:
                 progress_task.cancel()
                 try:

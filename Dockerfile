@@ -1,7 +1,7 @@
 FROM node:22-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip git curl ripgrep && \
+    apt-get install -y --no-install-recommends python3 python3-pip git curl ripgrep tini && \
     rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI
@@ -49,5 +49,8 @@ VOLUME ["/home/agent/.codex"]
 USER agent
 WORKDIR /workspace
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+# tini runs as PID 1 and reaps orphaned grandchildren (esbuild/node
+# subprocesses left behind when a codex run dies) — without it they
+# accumulate as zombies because Python doesn't reap reparented orphans.
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
 CMD ["python3", "-m", "src.main"]

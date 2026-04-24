@@ -243,11 +243,13 @@ async def run_superpos_poller(
                             _failed_tasks.add(task_id)
                         continue
 
-                    # Dream tasks bypass capacity check — they run in background
-                    # without consuming a semaphore slot or Telegram output.
-                    is_dream = task.get("type") == "dream"
+                    # Background tasks (dream, knowledge_fillin) bypass the
+                    # Telegram streamer and the semaphore — they're internal
+                    # housekeeping, not user-facing work.
+                    task_type = task.get("type")
+                    is_background = task_type in ("dream", "knowledge_fillin")
 
-                    if not is_dream and not executor.has_free_slots:
+                    if not is_background and not executor.has_free_slots:
                         log.debug("Executor at capacity (%d slots), deferring remaining tasks",
                                   config.codex_max_parallel)
                         break
@@ -260,9 +262,21 @@ async def run_superpos_poller(
 
                     task_claim_counts[task_id] = prior_claims + 1
 
-                    if is_dream:
-                        asyncio.create_task(executor.run_dream(task_id, prompt))
-                        log.info("Dream task %s started in background", task_id)
+                    if is_background:
+                        # Use server-provided timeout; default to 5 min so a
+                        # stuck subprocess can't hang the agent forever.
+                        raw_timeout = task.get("timeout_seconds")
+                        try:
+                            timeout_s = int(raw_timeout) if raw_timeout else 300
+                        except (TypeError, ValueError):
+                            timeout_s = 300
+                        asyncio.create_task(
+                            executor.run_background(task_id, prompt, task_type, timeout_s)
+                        )
+                        log.info(
+                            "%s task %s started in background (timeout=%ds)",
+                            task_type.replace("_", " ").capitalize(), task_id, timeout_s,
+                        )
                         continue
 
                     executor.add_superpos_task(task_id)
