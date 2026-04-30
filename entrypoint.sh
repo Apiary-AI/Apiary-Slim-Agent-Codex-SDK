@@ -48,18 +48,11 @@ TOML
 # tokens (persisted via the /home/agent/.codex volume) are preserved.
 if [ -n "$OPENAI_API_KEY" ] && [ ! -f "$HOME/.codex/auth.json" ]; then
     mkdir -p "$HOME/.codex"
-    if command -v codex >/dev/null 2>&1; then
-        # Preferred: let the codex CLI write auth.json so any future schema
-        # changes are handled by the CLI itself.
-        printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
-    else
-        # Fallback: write the JSON directly. Uppercase JSON key matches the
-        # Serde rename in codex's auth struct.
-        cat > "$HOME/.codex/auth.json" <<EOF
+    cat > "$HOME/.codex/auth.json" <<EOF
 {"OPENAI_API_KEY": "$OPENAI_API_KEY", "auth_mode": "ApiKey"}
 EOF
-        chmod 600 "$HOME/.codex/auth.json"
-    fi
+    chmod 600 "$HOME/.codex/auth.json"
+    echo "[entrypoint] Wrote $HOME/.codex/auth.json from OPENAI_API_KEY env" >&2
 fi
 
 # Run module setup (install deps, update AGENTS.md)
