@@ -72,6 +72,10 @@ If you prefer API key auth, skip step 3, set `OPENAI_API_KEY` in `.env`, and run
 docker run --env-file .env slim-codex-agent
 ```
 
+The `codex` CLI deliberately ignores `OPENAI_API_KEY` from the process env — it only reads `~/.codex/auth.json` (or OAuth tokens). The container's entrypoint handles this for you: on startup, if `OPENAI_API_KEY` is set and no `auth.json` exists yet, it runs `codex login --with-api-key` to materialize the env var into `~/.codex/auth.json`.
+
+If you mount the `codex_auth` volume and `auth.json` already exists (e.g. from a prior OAuth login via step 3), the entrypoint leaves it untouched — your OAuth session is preserved and `OPENAI_API_KEY` is ignored.
+
 ## Multi-agent setup (Docker Compose)
 
 Run multiple independent agents, each with its own Telegram bot and Superpos registration.
