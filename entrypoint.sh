@@ -38,21 +38,29 @@ TOML
 
 # Materialize OPENAI_API_KEY into ~/.codex/auth.json.
 #
-# `codex exec` deliberately ignores OPENAI_API_KEY from the process env — it
-# only reads ~/.codex/auth.json (or OAuth tokens). See
-# codex/login/src/auth/manager.rs:248. Without this step, setting
-# OPENAI_API_KEY in the container env appears to do nothing and the agent's
-# auth check fails on first run.
+# `codex exec` deliberately ignores OPENAI_API_KEY from process env — it only
+# reads ~/.codex/auth.json. See codex/login/src/auth/manager.rs:248. Without
+# this step, setting OPENAI_API_KEY in the container env appears to do
+# nothing and the agent's auth check fails.
 #
-# We skip the write if auth.json already exists so prior `codex login` OAuth
-# tokens (persisted via the /home/agent/.codex volume) are preserved.
-if [ -n "$OPENAI_API_KEY" ] && [ ! -f "$HOME/.codex/auth.json" ]; then
+# Some orchestrators (e.g. NoVPS) inject env vars slightly after PID 1
+# starts, so we wait briefly for the key to appear before writing.
+echo "[entrypoint] OPENAI_API_KEY length at script start: ${#OPENAI_API_KEY}" >&2
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -n "$OPENAI_API_KEY" ] && break
+    echo "[entrypoint] Waiting for OPENAI_API_KEY (${i}/10)..." >&2
+    sleep 1
+done
+
+if [ -n "$OPENAI_API_KEY" ]; then
     mkdir -p "$HOME/.codex"
     cat > "$HOME/.codex/auth.json" <<EOF
 {"OPENAI_API_KEY": "$OPENAI_API_KEY", "auth_mode": "apikey"}
 EOF
     chmod 600 "$HOME/.codex/auth.json"
-    echo "[entrypoint] Wrote $HOME/.codex/auth.json from OPENAI_API_KEY env" >&2
+    echo "[entrypoint] Wrote $HOME/.codex/auth.json (key length=${#OPENAI_API_KEY})" >&2
+else
+    echo "[entrypoint] WARNING: OPENAI_API_KEY still empty after 10s wait; auth.json NOT created" >&2
 fi
 
 # Run module setup (install deps, update AGENTS.md)
