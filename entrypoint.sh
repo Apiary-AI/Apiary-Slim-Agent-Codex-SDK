@@ -36,6 +36,32 @@ enabled = false
 apps = false
 TOML
 
+# Materialize OPENAI_API_KEY into ~/.codex/auth.json.
+#
+# `codex exec` deliberately ignores OPENAI_API_KEY from the process env — it
+# only reads ~/.codex/auth.json (or OAuth tokens). See
+# codex/login/src/auth/manager.rs:248. Without this step, setting
+# OPENAI_API_KEY in the container env appears to do nothing and the agent's
+# auth check fails on first run.
+#
+# We skip the write if auth.json already exists so prior `codex login` OAuth
+# tokens (persisted via the /home/agent/.codex volume) are preserved.
+if [ -n "$OPENAI_API_KEY" ] && [ ! -f "$HOME/.codex/auth.json" ]; then
+    mkdir -p "$HOME/.codex"
+    if command -v codex >/dev/null 2>&1; then
+        # Preferred: let the codex CLI write auth.json so any future schema
+        # changes are handled by the CLI itself.
+        printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
+    else
+        # Fallback: write the JSON directly. Uppercase JSON key matches the
+        # Serde rename in codex's auth struct.
+        cat > "$HOME/.codex/auth.json" <<EOF
+{"OPENAI_API_KEY": "$OPENAI_API_KEY", "auth_mode": "ApiKey"}
+EOF
+        chmod 600 "$HOME/.codex/auth.json"
+    fi
+fi
+
 # Run module setup (install deps, update AGENTS.md)
 python3 -m src.module_setup || echo "Warning: module setup failed"
 
