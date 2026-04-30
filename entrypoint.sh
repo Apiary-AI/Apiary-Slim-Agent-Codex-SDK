@@ -49,7 +49,7 @@ TOML
 if [ -n "$OPENAI_API_KEY" ] && [ ! -f "$HOME/.codex/auth.json" ]; then
     mkdir -p "$HOME/.codex"
     cat > "$HOME/.codex/auth.json" <<EOF
-{"OPENAI_API_KEY": "$OPENAI_API_KEY", "auth_mode": "ApiKey"}
+{"OPENAI_API_KEY": "$OPENAI_API_KEY", "auth_mode": "apikey"}
 EOF
     chmod 600 "$HOME/.codex/auth.json"
     echo "[entrypoint] Wrote $HOME/.codex/auth.json from OPENAI_API_KEY env" >&2
